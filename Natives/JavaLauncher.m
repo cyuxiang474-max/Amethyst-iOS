@@ -22,12 +22,27 @@
 
 extern char **environ;
 
-BOOL validateVirtualMemorySpace(size_t size) {
-    size <<= 20; // convert to MB
+BOOL validateVirtualMemorySpace(size_t sizeMB) {
+    // Probing maps the whole requested heap, which is a real cost at multi-GB
+    // sizes and was repeated on every Play press. A successful probe proves that
+    // size and any smaller size can be mapped, so remember the largest verified
+    // size. Failures are deliberately NOT cached: failing to map N MB does not
+    // prove that N-1 MB fails too, so we always re-probe after a failure.
+    static size_t verifiedMB = 0;
+    if (sizeMB <= verifiedMB) {
+        return YES;
+    }
+
+    size_t size = sizeMB << 20;
     void *map = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     // check if process successfully maps and unmaps a contiguous range
-    if(map == MAP_FAILED || munmap(map, size) != 0)
+    if (map == MAP_FAILED) {
         return NO;
+    }
+    if (munmap(map, size) != 0) {
+        return NO;
+    }
+    verifiedMB = sizeMB;
     return YES;
 }
 
@@ -53,47 +68,101 @@ void init_loadDefaultEnv() {
     setenv("HACK_IGNORE_START_ON_FIRST_THREAD", "1", 1);
 }
 
+// Split a user supplied string into tokens on whitespace, honouring double
+// quotes and backslash escapes so that values may contain spaces.
+// The previous implementations split on plain whitespace / " -", which shredded
+// any value containing a space and could not express a leading dash.
+NSArray<NSString *> *tokenizeArgs(NSString *input) {
+    NSMutableArray<NSString *> *tokens = [NSMutableArray array];
+    NSMutableString *current = [NSMutableString string];
+    BOOL inQuotes = NO;
+    BOOL escaping = NO;
+    BOOL hasToken = NO;
+
+    for (NSUInteger i = 0; i < input.length; i++) {
+        unichar c = [input characterAtIndex:i];
+        if (escaping) {
+            [current appendFormat:@"%C", c];
+            escaping = NO;
+        } else if (inQuotes && c == '\\') {
+            escaping = YES;
+        } else if (c == '"') {
+            inQuotes = !inQuotes;
+            hasToken = YES;
+        } else if (!inQuotes && (c == ' ' || c == '\t' || c == '\n' || c == '\r')) {
+            if (hasToken) {
+                [tokens addObject:[current copy]];
+                [current setString:@""];
+                hasToken = NO;
+            }
+        } else {
+            [current appendFormat:@"%C", c];
+            hasToken = YES;
+        }
+    }
+    if (escaping) [current appendString:@"\\"];
+    if (hasToken) {
+        [tokens addObject:[current copy]];
+    }
+    return tokens;
+}
+
 void init_loadCustomEnv() {
     NSString *envvars = getPrefObject(@"java.env_variables");
     if (envvars == nil) return;
     NSLog(@"[JavaLauncher] Reading custom environment variables");
-    for (NSString *line in [envvars componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceCharacterSet]) {
+    for (NSString *line in tokenizeArgs(envvars)) {
         if (![line containsString:@"="]) {
-            NSLog(@"[JavaLauncher] Warning: skipped empty value custom env variable: %@", line);
+            NSLog(@"[JavaLauncher] Warning: skipped malformed custom env variable (expected KEY=VALUE): %@", line);
             continue;
         }
         NSRange range = [line rangeOfString:@"="];
         NSString *key = [line substringToIndex:range.location];
         NSString *value = [line substringFromIndex:range.location+range.length];
         setenv(key.UTF8String, value.UTF8String, 1);
-        NSLog(@"[JavaLauncher] Added custom env variable: %@", line);
+        NSLog(@"[JavaLauncher] Added custom env variable: %@=%@", key, value);
     }
 }
 
 void init_loadCustomJvmFlags(int* argc, const char** argv) {
     NSString *jvmargs = [PLProfiles resolveKeyForCurrentProfile:@"javaArgs"];
     if (jvmargs == nil) return;
-    // Make the separator happy
-    jvmargs = [jvmargs stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-    jvmargs = [@" " stringByAppendingString:jvmargs];
 
     NSLog(@"[JavaLauncher] Reading custom JVM flags");
     NSArray *argsToPurge = @[@"Xms", @"Xmx", @"d32", @"d64"];
-    for (NSString *arg in [jvmargs componentsSeparatedByString:@" -"]) {
-        NSString *jvmarg = [arg stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
-        if (jvmarg.length == 0) continue;
+    // argv entries point into NSString UTF8 buffers, so the strings must outlive
+    // this function: JLI_Launch is not called until after we return. The previous
+    // code assigned a temporary autoreleased string's UTF8 pointer straight into
+    // argv, which only survived by luck of the enclosing autorelease pool.
+    static NSMutableArray<NSString *> *retainedFlags;
+    if (retainedFlags == nil) {
+        retainedFlags = [NSMutableArray array];
+    }
+    [retainedFlags removeAllObjects];
+    for (NSString *jvmarg in tokenizeArgs(jvmargs)) {
+        // Historically flags were entered without a leading dash (the old parser
+        // split on " -" and consumed it), but many users type "-Xmx2G". Accept
+        // both forms and normalise to exactly one leading dash, otherwise a
+        // user supplied dash would produce a bogus "--Xmx2G" argument.
+        NSString *normalized = jvmarg;
+        while ([normalized hasPrefix:@"-"]) {
+            normalized = [normalized substringFromIndex:1];
+        }
+        if (normalized.length == 0) continue;
+
         BOOL ignore = NO;
         for (NSString *argToPurge in argsToPurge) {
-            if ([jvmarg hasPrefix:argToPurge]) {
-                NSLog(@"[JavaLauncher] Ignored JVM flag: -%@", jvmarg);
+            if ([normalized hasPrefix:argToPurge]) {
+                NSLog(@"[JavaLauncher] Ignored JVM flag: -%@", normalized);
                 ignore = YES;
                 break;
             }
         }
         if (ignore) continue;
 
-        ++*argc;
-        argv[*argc] = [@"-" stringByAppendingString:jvmarg].UTF8String;
+        NSString *flag = [@"-" stringByAppendingString:normalized];
+        [retainedFlags addObject:flag];
+        argv[++*argc] = flag.UTF8String;
 
         NSLog(@"[JavaLauncher] Added custom JVM flag: %s", argv[*argc]);
     }
@@ -172,6 +241,16 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
         // Setup RENDERER
         NSString *renderer = [PLProfiles resolveKeyForCurrentProfile:@"renderer"];
         NSLog(@"[JavaLauncher] RENDERER is set to %@\n", renderer);
+        // OSMesa routes through zink/MoltenVK, which has reproducible shader
+        // compilation failures on iOS 26+ (VK_ERROR_INITIALIZATION_FAILED
+        // followed by a SIGSEGV inside MVKCmdBindGraphicsPipeline). Warn rather
+        // than silently override, so an explicit choice is still respected.
+        if (renderer != nil &&
+            [renderer rangeOfString:@"OSMesa" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+            NSLog(@"[JavaLauncher] WARNING: RENDERER=%@ goes through zink/MoltenVK, which is known to "
+                  @"fail shader compilation and crash on iOS 26+. %@ is usually more reliable.",
+                  renderer, RENDERER_NAME_MTL_ANGLE);
+        }
         setenv("RENDERER", renderer.UTF8String, 1);
         // Setup gameDir
         gameDir = [NSString stringWithFormat:@"%s/instances/%@/%@",
@@ -193,14 +272,35 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
             isExecuteJar ? [launchTarget lastPathComponent] : PLProfiles.current.selectedProfile[@"lastVersionId"], minVersion]);
         return 1;
     } else if ([javaHome hasPrefix:@(getenv("AME_HOME"))]) {
-        // Copy libawt_xawt.dylib
+        // Copy libawt_xawt.dylib into the JRE. This used to remove and re-copy
+        // the whole dylib on every single Play press; skip it when the file in
+        // the JRE already matches the bundled one.
         NSString *dest = [NSString stringWithFormat:@"%@/lib/libawt_xawt.dylib", javaHome];
         NSString *source = [NSString stringWithFormat:@"%@/Frameworks/libawt_xawt.dylib", NSBundle.mainBundle.bundlePath];
-        NSError *error;
-        [fm removeItemAtPath:dest error:nil];
-        [fm copyItemAtPath:source toPath:dest error:&error];
-        if (error) {
-            NSLog(@"[JavaLauncher] Copy libawt_xawt.dylib failed: %@", error.localizedDescription);
+        NSDictionary *sourceAttrs = [fm attributesOfItemAtPath:source error:nil];
+        NSDictionary *destAttrs = [fm attributesOfItemAtPath:dest error:nil];
+        NSDate *sourceDate = sourceAttrs[NSFileModificationDate];
+        BOOL upToDate = NO;
+        if (sourceAttrs && destAttrs && sourceDate) {
+            NSDate *destDate = destAttrs[NSFileModificationDate];
+            upToDate = [sourceAttrs[NSFileSize] isEqualToNumber:destAttrs[NSFileSize]] &&
+                       [destDate isEqualToDate:sourceDate];
+        }
+        if (upToDate) {
+            NSDebugLog(@"[JavaLauncher] libawt_xawt.dylib already current, skipping copy");
+        } else {
+            NSError *error;
+            [fm removeItemAtPath:dest error:nil];
+            [fm copyItemAtPath:source toPath:dest error:&error];
+            if (error) {
+                NSLog(@"[JavaLauncher] Copy libawt_xawt.dylib failed: %@", error.localizedDescription);
+            } else if (sourceDate) {
+                // copyItemAtPath: stamps the destination with "now". Syncing the
+                // modification date back is what lets the next launch detect that
+                // the file is already current instead of re-copying again.
+                [fm setAttributes:@{NSFileModificationDate: sourceDate}
+                      ofItemAtPath:dest error:nil];
+            }
         }
     }
 
@@ -236,7 +336,11 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     if (!launchJar) {
         margv[++margc] = "-Djava.system.class.loader=net.kdt.pojavlaunch.PojavClassLoader";
     }
-    margv[++margc] = "-Xms128M";
+    // Size the initial heap closer to the maximum. A fixed -Xms128M next to a
+    // multi-GB -Xmx makes the JVM repeatedly commit and grow the heap during
+    // startup, which shows up as GC churn and a slower time-to-first-frame.
+    int initialHeapMB = MIN(512, MAX(128, allocmem / 4));
+    margv[++margc] = [NSString stringWithFormat:@"-Xms%dM", initialHeapMB].UTF8String;
     margv[++margc] = [NSString stringWithFormat:@"-Xmx%dM", allocmem].UTF8String;
     margv[++margc] = [NSString stringWithFormat:@"-Djava.library.path=%@/Frameworks", NSBundle.mainBundle.bundlePath].UTF8String;
     margv[++margc] = [NSString stringWithFormat:@"-Duser.dir=%@", gameDir].UTF8String;
@@ -342,11 +446,27 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     margv[++margc] = cacio_classpath.UTF8String;
 
     // FIXME: the JVM arg is deprecated; and it is currently broken for Java 25
-    if (!getenv("JVM_KEEP_UseCompressedClassPointers") || !getEntitlementValue(@"com.apple.developer.kernel.extended-virtual-addressing")) {
+    // Disabling compressed class pointers costs both runtime speed and memory.
+    // The previous condition ignored the override unless extended virtual
+    // addressing was also present, so there was no way to force it either way.
+    // The default is deliberately left unchanged (we cannot verify on device
+    // whether extended VA actually permits compressed class space), but the
+    // override now works in both directions for experimentation.
+    const char *keepCCP = getenv("JVM_KEEP_UseCompressedClassPointers");
+    BOOL extendedVA = getEntitlementValue(@"com.apple.developer.kernel.extended-virtual-addressing");
+    if (keepCCP != NULL) {
+        BOOL forceKeep = (strcmp(keepCCP, "0") != 0);
+        NSDebugLog(@"[JavaLauncher] JVM_KEEP_UseCompressedClassPointers=%s (extendedVA=%@)",
+                   keepCCP, extendedVA ? @"YES" : @"NO");
+        if (!forceKeep) {
+            margv[++margc] = "-XX:-UseCompressedClassPointers";
+        }
+    } else if (!extendedVA) {
         // In jailed environment, where extended virtual addressing entitlement isn't
         // present (for free dev account), allocating compressed space fails.
         // FIXME: does extended VA allow allocating compressed class space?
         margv[++margc] = "-XX:-UseCompressedClassPointers";
+        NSDebugLog(@"[JavaLauncher] Compressed class pointers disabled: extended virtual addressing unavailable");
     }
 
     if ([launchTarget isKindOfClass:NSDictionary.class]) {
