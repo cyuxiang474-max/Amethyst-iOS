@@ -57,6 +57,27 @@ void init_hookUIKitConstructor(void) {
 
 @implementation UIBarButtonItem(addition)
 - (UIView *)buttonGlassView {
+    if (@available(iOS 26.0, *)) {
+        // Liquid Glass changed UIBarButtonItem's view hierarchy, so the legacy
+        // fixed-depth traversal can land on UIPlatformGlassInteractionView. That
+        // class is a UIView but NOT a UIControl, and callers hand the returned
+        // object to sendActionsForControlEvents:, which then throws
+        // "unrecognized selector sent to instance" on iOS 26+.
+        // Walk up until we find a real UIControl instead of assuming a depth.
+        // isKindOfClass:nil is NO, so this is safe on older systems too.
+        UIView *view = self.view;
+        for (int depth = 0; view && depth < 16; depth++) {
+            if ([view isKindOfClass:UIControl.class] &&
+                ![view isKindOfClass:NSClassFromString(@"UIPlatformGlassInteractionView")]) {
+                return view;
+            }
+            view = view.superview;
+        }
+        // No UIControl in the chain (possible under LiveContainer). Returning
+        // self.view still gives callers a valid view for popover anchoring;
+        // callers must tolerate a non-UIControl, which is guarded at the sink.
+        return self.view;
+    }
     return self.view.superview.superview.superview.superview;
 }
 @end

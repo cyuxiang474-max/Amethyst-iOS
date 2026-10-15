@@ -256,8 +256,16 @@
         setPrefObject(@"internal.selected_account", BaseAuthenticator.current.authData[@"username"]);
         [self updateAccountInfo];
         if (sender != self.accountButton) {
-            // Called from the play button, so call back to continue
-            [sender sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
+            // Called from the play button, so call back to continue.
+            // On iOS 26+ the sender may not be a UIControl (Liquid Glass changes
+            // UIBarButtonItem's hierarchy), so verify before messaging it.
+            if ([sender respondsToSelector:@selector(sendActionsForControlEvents:)]) {
+                [sender sendActionsForControlEvents:UIControlEventPrimaryActionTriggered];
+            } else {
+                NSDebugLog(@"[LauncherMenu] Play sender is not a UIControl, "
+                            @"cannot resume automatically (%@). "
+                            @"Tap Play again to continue.", NSStringFromClass(sender));
+            }
         }
     };
     vc.modalPresentationStyle = UIModalPresentationPopover;
