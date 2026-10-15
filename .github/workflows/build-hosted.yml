@@ -62,7 +62,23 @@ jobs:
           # ldid formula depends on, so it has to be installed explicitly first,
           # otherwise `brew install ldid` aborts the job.
           brew install --cask diskcatalogmaker || echo "WARN: diskcatalogmaker cask failed"
-          brew install gmake || echo "WARN: gmake failed"
+
+          # NOTE: there is no `gmake` formula. Homebrew's GNU make formula is
+          # called `make`, and because macOS already ships /usr/bin/make the
+          # formula installs its binary as `gmake`. Asking brew for `gmake`
+          # directly fails with "No available formula with the name gmake".
+          brew install make || echo "WARN: brew make failed"
+
+          # Safety net: macOS ships GNU Make 3.81 as /usr/bin/make. This Makefile
+          # uses no GNU Make 4.x-only constructs (no .ONESHELL, no $(file ...),
+          # no != shell assignment), so 3.81 is an acceptable substitute.
+          if ! command -v gmake >/dev/null 2>&1; then
+            if /usr/bin/make --version 2>/dev/null | head -1 | grep -qi 'GNU Make'; then
+              ln -sf /usr/bin/make /usr/local/bin/gmake
+              echo "fallback: linked /usr/bin/make as gmake"
+            fi
+          fi
+
           brew install ldid || echo "WARN: ldid failed"
 
           # The Makefile requires javac to report exactly 1.8.0
