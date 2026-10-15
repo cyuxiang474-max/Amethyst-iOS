@@ -2,6 +2,12 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <libgen.h>
+// launchJVM calls task_set_exception_ports()/mach_task_self() below, and
+// main_hook.m relies on the same family. Nothing in utils.h pulls in
+// <mach/mach.h>, so these used to compile only because another header happened
+// to include it transitively; clang 15+ rejects implicit function declarations,
+// which fails the build with "call to undeclared function". Include it directly.
+#include <mach/mach.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>

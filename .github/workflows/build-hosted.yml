@@ -149,6 +149,20 @@ jobs:
             exit 1
           fi
 
+          # ldid declares the diskcatalogmaker cask as a dependency, and that
+          # cask currently fails with a SHA-256 mismatch because the vendor
+          # re-published its zip without updating the cask hash. ldid's own -S/-M
+          # paths do not shell out to it, but if that assumption were ever wrong
+          # we would not find out until the 'payload' target, twenty minutes into
+          # the build. Execute ldid once now: usage text proves it runs.
+          ldid_out="$(ldid 2>&1 | head -3 || true)"
+          if [ -z "$ldid_out" ]; then
+            echo "FATAL: ldid is on PATH but produced no output" >&2
+            exit 1
+          fi
+          echo "ldid smoke test:"
+          printf '%s\n' "$ldid_out"
+
           gmake --version | head -1
 
       - name: Cache CMake build and JREs

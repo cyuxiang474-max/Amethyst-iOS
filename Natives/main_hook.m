@@ -7,6 +7,10 @@
 
 #include <dlfcn.h>
 #include <libgen.h>
+// Installs a catch Mach exception server, so this needs the mach port and
+// message APIs. utils.h does not include <mach/mach.h>; relying on a transitive
+// include breaks on clang 15+, which rejects implicit function declarations.
+#include <mach/mach.h>
 #include <pthread.h>
 #include "external/fishhook/fishhook.h"
 

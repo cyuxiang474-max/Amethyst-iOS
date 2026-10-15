@@ -11,6 +11,9 @@
 #include <mach-o/nlist.h>
 #include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
+// vm_protect/vm_remap/task_info and mach_task_self() below come from the Mach
+// headers, which nothing includes transitively here.
+#include <mach/mach.h>
 #include <sys/syscall.h>
 #include <libkern/OSCacheControl.h>
 
