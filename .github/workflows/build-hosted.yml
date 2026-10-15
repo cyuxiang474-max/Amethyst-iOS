@@ -1,0 +1,115 @@
+name: Build IPA (GitHub-hosted macOS)
+
+# The upstream development.yml runs on a self-hosted runner (J316sAP) that only
+# exists on the maintainer's machine, so a fork's push would queue forever with
+# "no runner matching labels". This workflow is a drop-in replacement that uses
+# GitHub-hosted macOS runners so a fork can actually build an IPA.
+#
+# Provenance: every build step below is invoked from the repository's own
+# Makefile; nothing about how Amethyst is compiled is changed here. The only
+# additions are toolchain setup (ldid is not preinstalled) and a JDK 8 fallback.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'fix/**'
+      - 'build/**'
+    paths-ignore:
+      - 'l10n_main'
+
+jobs:
+  build:
+    name: Build IPA
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 2
+            platform_name: ios
+
+    runs-on: macos-15
+    timeout-minutes: 360
+
+    steps:
+      - name: Show runner info
+        run: |
+          echo "runner: $RUNNER_NAME ($RUNNER_ARCH)"
+          sw_vers
+          xcodebuild -version
+          cmake --version | head -1
+          /usr/libexec/java_home -V 2>&1 || true
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build tools
+        run: |
+          set -euo pipefail
+          # ldid is required by the Makefile 'payload' target to ad-hoc sign the
+          # app bundle. It is not present on GitHub-hosted runners.
+          if ! command -v ldid >/dev/null 2>&1; then
+            brew install ldid
+          fi
+          ldid 2>&1 | head -2 || true
+
+          # The Makefile requires javac to report exactly 1.8.0
+          # (Makefile:194 filters on `javac -version`). GitHub's macOS images ship
+          # Temurin 8, but fall back to Homebrew if java_home cannot resolve it.
+          if ! /usr/libexec/java_home -v 1.8 >/dev/null 2>&1; then
+            echo "JDK 8 not found, installing Temurin 8"
+            brew install --cask temurin@8
+            /usr/libexec/java_home -v 1.8
+          fi
+          "$(/usr/libexec/java_home -v 1.8)/bin/javac" -version
+
+      - name: Cache CMake build and JREs
+        uses: actions/cache@v4
+        with:
+          path: |
+            Natives/build
+            depends
+          key: amethyst-hosted-${{ runner.os }}-${{ hashFiles('Makefile', 'Natives/CMakeLists.txt', 'Natives/external/**/CMakeLists.txt') }}
+          restore-keys: |
+            amethyst-hosted-${{ runner.os }}-
+
+      - name: Build ipa
+        run: |
+          set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+          export SLIMMED=1
+          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=${{ matrix.platform }}
+
+      - name: Verify artifact
+        run: |
+          set -euo pipefail
+          ls -lh artifacts/
+          # Both the regular and the slimmed IPA are produced when SLIMMED=1,
+          # so match with ls rather than a shell glob (a multi-match glob would
+          # make `test -f` fail on argument count).
+          ls artifacts/ | grep -E '^org\.angelauramc\.amethyst.*-ios\.ipa$'
+          for ipa in artifacts/org.angelauramc.amethyst*-ios.ipa; do
+            echo "--- $ipa ---"
+            unzip -l "$ipa" | grep -q 'Payload/AngelAuraAmethyst.app/Info.plist' \
+              || { echo "MISSING Info.plist in $ipa"; exit 1; }
+            unzip -l "$ipa" | grep -q 'AngelAuraAmethyst.app/AngelAuraAmethyst' \
+              || { echo "MISSING main binary in $ipa"; exit 1; }
+            echo "ok"
+          done
+
+      - name: Upload ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: org.angelauramc.amethyst-${{ matrix.platform_name }}.ipa
+          path: artifacts/org.angelauramc.amethyst-*-${{ matrix.platform_name }}.ipa
+          if-no-files-found: error
+
+      - name: Upload dSYM
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: AngelAuraAmethyst.dSYM
+          path: artifacts/AngelAuraAmethyst.dSYM
+          if-no-files-found: ignore
