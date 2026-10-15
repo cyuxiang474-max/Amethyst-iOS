@@ -28,12 +28,23 @@ jobs:
           - platform: 2
             platform_name: ios
 
-    # Deliberately the Intel image, not the default Apple Silicon `macos-15`.
-    # JDK 8 has no arm64 macOS build from any vendor, so the Temurin 8 cask
-    # installs an x86_64 JDK. On an arm64 runner its `javac` aborts with "Bad CPU
-    # type in executable" unless Rosetta 2 is present, and `javac -version`
-    # then prints nothing, which is indistinguishable from "no JDK installed".
-    runs-on: macos-15-intel
+    # Two independent constraints force this label, and neither is negotiable:
+    #
+    # 1. Intel, not Apple Silicon. JDK 8 has no arm64 macOS build from any
+    #    vendor, so the Temurin 8 cask installs an x86_64 JDK. On an arm64
+    #    runner its `javac` aborts with "Bad CPU type in executable" unless
+    #    Rosetta 2 is present, and `javac -version` then prints nothing, which
+    #    the Makefile's 1.8.0 check reads as "no JDK installed".
+    #
+    # 2. macOS 26, i.e. an iOS 26 SDK. LauncherProfilesViewController.m:80 calls
+    #    UIBarButtonItem.sharesBackground, which is public API only in the iOS 26
+    #    SDK. Built against the iOS 18 SDK that ships with macos-15, that file
+    #    fails with "property 'sharesBackground' not found on object of type
+    #    'UIBarButtonItem *'".
+    #
+    # xcode-27 would give a newer SDK still, but it is arm64-only and a public
+    # preview, so it would reintroduce constraint 1.
+    runs-on: macos-26-intel
     timeout-minutes: 360
 
     steps:
