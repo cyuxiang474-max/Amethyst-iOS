@@ -81,13 +81,43 @@ jobs:
 
           brew install ldid || echo "WARN: ldid failed"
 
-          # The Makefile requires javac to report exactly 1.8.0
-          # (Makefile:194 filters on `javac -version`). GitHub's macOS images ship
-          # Temurin 8, but fall back to Homebrew if java_home cannot resolve it.
-          if ! /usr/libexec/java_home -v 1.8 >/dev/null 2>&1; then
-            echo "JDK 8 not found, installing Temurin 8"
-            brew install --cask temurin@8 || echo "WARN: temurin@8 failed"
+          # The Makefile hard-requires a JDK whose javac reports exactly 1.8.0
+          # (Makefile:194 filters `javac -version | cut -b 7-11` against the
+          # literal 1.8.0, and Makefile:190 errors out otherwise). Do not trust
+          # `java_home -v 1.8` to hand us a usable one: resolve a JDK, check the
+          # version string the same way the Makefile does, and fall back to
+          # Temurin 8 when nothing matches.
+          echo "--- installed JVMs ---"
+          /usr/libexec/java_home -V 2>&1 || true
+          echo "---------------------"
+
+          JDK8_HOME=""
+          for candidate in $(/usr/libexec/java_home -V 2>&1 | sed -n 's/.*- \(.*\)/\1/p'); do
+            [ -x "$candidate/bin/javac" ] || continue
+            reported="$("$candidate/bin/javac" -version 2>&1 | cut -b 7-11)"
+            echo "candidate: $candidate -> javac reports '${reported}'"
+            if [ "$reported" = "1.8.0" ]; then JDK8_HOME="$candidate"; break; fi
+          done
+
+          if [ -z "$JDK8_HOME" ]; then
+            echo "No JDK reported 1.8.0; installing Temurin 8"
+            brew install --cask temurin@8 || echo "WARN: temurin@8 cask failed"
+            for candidate in "$(brew --prefix temurin@8 2>/dev/null || true)/libexec/openjdk.jdk/Contents/Home" \
+                             "$(brew --prefix 2>/dev/null || true)/opt/temurin@8/libexec/openjdk.jdk/Contents/Home"; do
+              [ -x "$candidate/bin/javac" ] || continue
+              reported="$("$candidate/bin/javac" -version 2>&1 | cut -b 7-11)"
+              echo "temurin candidate: $candidate -> javac reports '${reported}'"
+              if [ "$reported" = "1.8.0" ]; then JDK8_HOME="$candidate"; break; fi
+            done
           fi
+
+          if [ -z "$JDK8_HOME" ]; then
+            echo "FATAL: could not obtain a JDK reporting 1.8.0" >&2
+            exit 1
+          fi
+          echo "JDK8_HOME=$JDK8_HOME"
+          "$JDK8_HOME/bin/javac" -version
+          echo "JDK8_HOME=$JDK8_HOME" >> "$GITHUB_ENV"
 
           # Report every missing tool at once rather than dying later in the build.
           missing=()
@@ -99,9 +129,6 @@ jobs:
             exit 1
           fi
 
-          /usr/libexec/java_home -v 1.8 >/dev/null 2>&1 \
-            && "$(/usr/libexec/java_home -v 1.8)/bin/javac" -version \
-            || { echo "MISSING: JDK 8 (javac must report exactly 1.8.0)" >&2; exit 1; }
           gmake --version | head -1
 
       - name: Cache CMake build and JREs
@@ -120,7 +147,13 @@ jobs:
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
           export SLIMMED=1
           echo "gmake: $(command -v gmake)"
-          gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=${{ matrix.platform }}
+          echo "BOOTJDK: $JDK8_HOME/bin"
+          # Pass BOOTJDK explicitly. The Makefile only uses `?=` for it
+          # (Makefile:59), so an environment-provided value would silently win
+          # and the 1.8.0 check would then fail against the wrong JDK.
+          gmake -j"$(sysctl -n hw.ncpu)" dsym package \
+            PLATFORM=${{ matrix.platform }} \
+            BOOTJDK="$JDK8_HOME/bin"
 
       - name: Verify artifact
         run: |
