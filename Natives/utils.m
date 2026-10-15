@@ -213,29 +213,52 @@ BOOL DeviceHasTXMReal(void) {
     if(!d) {
         // /private/preboot is not accessible in 27.0 and 26.6?, fallback to speculation
         NSUInteger (*MGGetSInt64Answer)(NSString *) = dlsym(RTLD_DEFAULT, "MGGetSInt64Answer");
+        if (MGGetSInt64Answer == NULL) {
+            // Never call through an unresolved symbol: on a system that does not
+            // export it this was a guaranteed crash during JIT flag detection.
+            NSDebugLog(@"[JIT] /private/preboot unreadable and MGGetSInt64Answer unresolved, assuming TXM present");
+            return YES;
+        }
         NSUInteger chipID = MGGetSInt64Answer(@"ChipID");
+        BOOL speculated;
         switch(chipID) {
             case 0x8020: // A12
             case 0x8027: // A12X/Z
-                return NO;
+                speculated = NO;
+                break;
             case 0x8030: // A13
             case 0x8101: // A14
             case 0x8103: // M1
-                if (@available(iOS 27.0, *)) return YES; return NO;
+                speculated = @available(iOS 27.0, *);
+                break;
             default:
-                if (@available(iOS 19.0, *)) return YES; return NO;
+                speculated = @available(iOS 19.0, *);
+                break;
         }
+        NSDebugLog(@"[JIT] /private/preboot unreadable, speculating TXM=%@ from ChipID 0x%X",
+                   speculated ? @"YES" : @"NO", (unsigned int)chipID);
+        return speculated;
     }
     // deterministically detect TXM for 17.0-26.5?
     struct dirent *dir;
-    char txmPath[PATH_MAX];
+    // Must be initialised: if no directory entry matches the expected length
+    // below, we used to call access() on uninitialised stack memory, which is
+    // undefined behaviour and could report a bogus TXM state on 26.6 / 27.0.
+    char txmPath[PATH_MAX] = {0};
+    BOOL foundVolume = NO;
     while ((dir = readdir(d)) != NULL) {
         if(strlen(dir->d_name) == 96) {
             snprintf(txmPath, sizeof(txmPath), "/private/preboot/%s/usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4", dir->d_name);
+            foundVolume = YES;
             break;
         }
     }
     closedir(d);
+    if (!foundVolume) {
+        // No candidate volume directory found, so we cannot determine TXM here.
+        NSDebugLog(@"[JIT] /private/preboot scanned but no 96-char volume found, assuming no TXM");
+        return NO;
+    }
     return access(txmPath, F_OK) == 0;
 }
 // Thin wrapper of DeviceHasJITFlags to respect overriden flag
