@@ -28,7 +28,12 @@ jobs:
           - platform: 2
             platform_name: ios
 
-    runs-on: macos-15
+    # Deliberately the Intel image, not the default Apple Silicon `macos-15`.
+    # JDK 8 has no arm64 macOS build from any vendor, so the Temurin 8 cask
+    # installs an x86_64 JDK. On an arm64 runner its `javac` aborts with "Bad CPU
+    # type in executable" unless Rosetta 2 is present, and `javac -version`
+    # then prints nothing, which is indistinguishable from "no JDK installed".
+    runs-on: macos-15-intel
     timeout-minutes: 360
 
     steps:
@@ -81,49 +86,57 @@ jobs:
 
           brew install ldid || echo "WARN: ldid failed"
 
-          # The Makefile hard-requires a JDK whose javac reports exactly 1.8.0
-          # (Makefile:194 filters `javac -version | cut -b 7-11` against the
-          # literal 1.8.0, and Makefile:190 errors out otherwise). Do not trust
-          # `java_home -v 1.8` to hand us a usable one: resolve a JDK, check the
-          # version string the same way the Makefile does, and fall back to
-          # Temurin 8 when nothing matches.
-          echo "--- installed JVMs ---"
-          /usr/libexec/java_home -V 2>&1 || true
-          echo "---------------------"
+          # ------------------------------------------------------------------
+          # JDK 8
+          #
+          # The Makefile hard-requires a javac reporting exactly 1.8.0
+          # (Makefile:190 errors out otherwise; Makefile:194 filters
+          # `javac -version | cut -b 7-11` against the literal 1.8.0), and
+          # JavaApp/Makefile calls `$(BOOTJDK)/javac` with no -source/-target, so
+          # the emitted class file version simply follows whichever JDK is used.
+          # A newer JDK would write major-version 65 class files that the bundled
+          # Zulu 8 JRE cannot load. JDK 8 is mandatory, not cosmetic.
+          #
+          # Install it up front instead of probing first: the runner's own JDKs
+          # are 11/17/21/25, so the probe can only ever fail on a fresh runner
+          # and would just cost a `java_home -V` round trip.
+          # ------------------------------------------------------------------
+          echo "host arch: $(uname -m)"
+          brew install --cask temurin@8 || echo "WARN: temurin@8 cask failed"
 
           JDK8_HOME=""
-          # `java_home -V` prints "<version><TAB><path>" one per line. Parse the
-          # last tab-separated field as the path. (An earlier attempt used
-          # sed 's/.*- \(.*\)/\1/p', which never matched because no path contains
-          # a dash followed by a space, so the loop body never ran at all.)
-          for candidate in $(/usr/libexec/java_home -V 2>&1 | awk -F'\t' 'NF>1 {print $NF}') \
-                           $(/usr/libexec/java_home -v 1.8 2>/dev/null || true); do
+          # Do NOT parse `java_home -V` for the JDK list. Its version table is
+          # written to stderr and is space-separated, not tab-separated, so both
+          # earlier parsers (sed 's/.*- \(.*\)/\1/p' and awk -F'\t' 'NF>1')
+          # silently produced an empty list and the step fell through to the
+          # Temurin branch with no candidate ever tested.
+          #
+          # Ask java_home directly for 1.8, and also glob the directory the
+          # cask's pkg installer registers, so either mechanism resolving is
+          # enough.
+          candidates="$(/usr/libexec/java_home -v 1.8 2>/dev/null || true)"
+          candidates="$candidates $(ls -d /Library/Java/JavaVirtualMachines/*/Contents/Home 2>/dev/null || true)"
+
+          for candidate in $candidates; do
             [ -x "$candidate/bin/javac" ] || continue
-            reported="$("$candidate/bin/javac" -version 2>&1 | cut -b 7-11)"
-            echo "candidate: $candidate -> javac reports '${reported}'"
+            rawver="$("$candidate/bin/javac" -version 2>&1 | head -1)"
+            reported="$(printf '%s' "$rawver" | cut -b 7-11)"
+            echo "candidate: $candidate -> [$(file -b "$candidate/bin/javac" 2>/dev/null)] ${rawver:-<javac produced no output>}"
             if [ "$reported" = "1.8.0" ]; then JDK8_HOME="$candidate"; break; fi
           done
 
           if [ -z "$JDK8_HOME" ]; then
-            echo "No JDK reported 1.8.0; installing Temurin 8"
-            brew install --cask temurin@8 || echo "WARN: temurin@8 cask failed"
-            # Re-enumerate: the cask registers itself with java_home.
-            for candidate in $(/usr/libexec/java_home -V 2>&1 | awk -F'\t' 'NF>1 {print $NF}'); do
-              [ -x "$candidate/bin/javac" ] || continue
-              reported="$("$candidate/bin/javac" -version 2>&1 | cut -b 7-11)"
-              echo "post-temurin candidate: $candidate -> javac reports '${reported}'"
-              if [ "$reported" = "1.8.0" ]; then JDK8_HOME="$candidate"; break; fi
-            done
-          fi
-
-          if [ -z "$JDK8_HOME" ]; then
             echo "FATAL: could not obtain a JDK reporting 1.8.0" >&2
             echo "--- java_home -V raw output ---" >&2
-            /usr/libexec/java_home -V 2>&1 >&2 || true
+            /usr/libexec/java_home -V >&2 || true
+            echo "--- candidates probed ---" >&2
+            for candidate in $candidates; do echo "  $candidate" >&2; done
             exit 1
           fi
+
           echo "JDK8_HOME=$JDK8_HOME"
           "$JDK8_HOME/bin/javac" -version
+          "$JDK8_HOME/bin/jar" --version 2>&1 | head -1 || true
           echo "JDK8_HOME=$JDK8_HOME" >> "$GITHUB_ENV"
 
           # Report every missing tool at once rather than dying later in the build.
