@@ -92,7 +92,12 @@ jobs:
           echo "---------------------"
 
           JDK8_HOME=""
-          for candidate in $(/usr/libexec/java_home -V 2>&1 | sed -n 's/.*- \(.*\)/\1/p'); do
+          # `java_home -V` prints "<version><TAB><path>" one per line. Parse the
+          # last tab-separated field as the path. (An earlier attempt used
+          # sed 's/.*- \(.*\)/\1/p', which never matched because no path contains
+          # a dash followed by a space, so the loop body never ran at all.)
+          for candidate in $(/usr/libexec/java_home -V 2>&1 | awk -F'\t' 'NF>1 {print $NF}') \
+                           $(/usr/libexec/java_home -v 1.8 2>/dev/null || true); do
             [ -x "$candidate/bin/javac" ] || continue
             reported="$("$candidate/bin/javac" -version 2>&1 | cut -b 7-11)"
             echo "candidate: $candidate -> javac reports '${reported}'"
@@ -102,17 +107,19 @@ jobs:
           if [ -z "$JDK8_HOME" ]; then
             echo "No JDK reported 1.8.0; installing Temurin 8"
             brew install --cask temurin@8 || echo "WARN: temurin@8 cask failed"
-            for candidate in "$(brew --prefix temurin@8 2>/dev/null || true)/libexec/openjdk.jdk/Contents/Home" \
-                             "$(brew --prefix 2>/dev/null || true)/opt/temurin@8/libexec/openjdk.jdk/Contents/Home"; do
+            # Re-enumerate: the cask registers itself with java_home.
+            for candidate in $(/usr/libexec/java_home -V 2>&1 | awk -F'\t' 'NF>1 {print $NF}'); do
               [ -x "$candidate/bin/javac" ] || continue
               reported="$("$candidate/bin/javac" -version 2>&1 | cut -b 7-11)"
-              echo "temurin candidate: $candidate -> javac reports '${reported}'"
+              echo "post-temurin candidate: $candidate -> javac reports '${reported}'"
               if [ "$reported" = "1.8.0" ]; then JDK8_HOME="$candidate"; break; fi
             done
           fi
 
           if [ -z "$JDK8_HOME" ]; then
             echo "FATAL: could not obtain a JDK reporting 1.8.0" >&2
+            echo "--- java_home -V raw output ---" >&2
+            /usr/libexec/java_home -V 2>&1 >&2 || true
             exit 1
           fi
           echo "JDK8_HOME=$JDK8_HOME"
