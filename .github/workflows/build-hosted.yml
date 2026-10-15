@@ -48,12 +48,15 @@ jobs:
       - name: Install build tools
         run: |
           set -euo pipefail
+          export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
           # ldid is required by the Makefile 'payload' target to ad-hoc sign the
-          # app bundle. It is not present on GitHub-hosted runners.
-          if ! command -v ldid >/dev/null 2>&1; then
-            brew install ldid
-          fi
-          ldid 2>&1 | head -2 || true
+          # app bundle. gmake is required because the Makefile declares
+          # `SHELL := /bin/bash` and uses GNU-only constructs (pattern rules,
+          # $(shell), .SUFFIXES); BSD make on macOS cannot build it. Neither is
+          # present on GitHub-hosted runners, which is what caused the first
+          # run to die with "gmake: command not found" (exit 127).
+          brew install gmake ldid
 
           # The Makefile requires javac to report exactly 1.8.0
           # (Makefile:194 filters on `javac -version`). GitHub's macOS images ship
@@ -63,7 +66,18 @@ jobs:
             brew install --cask temurin@8
             /usr/libexec/java_home -v 1.8
           fi
+
+          # Fail loudly and specifically here rather than 44 seconds into the job.
+          for tool in gmake cmake ldid zip unzip xcrun; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "MISSING REQUIRED TOOL: $tool" >&2
+              exit 1
+            fi
+            echo "ok: $tool -> $(command -v "$tool")"
+          done
           "$(/usr/libexec/java_home -v 1.8)/bin/javac" -version
+          gmake --version | head -1
+          ldid 2>&1 | head -2 || true
 
       - name: Cache CMake build and JREs
         uses: actions/cache@v4
@@ -80,6 +94,7 @@ jobs:
           set -euo pipefail
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
           export SLIMMED=1
+          echo "gmake: $(command -v gmake)"
           gmake -j"$(sysctl -n hw.ncpu)" dsym package PLATFORM=${{ matrix.platform }}
 
       - name: Verify artifact
