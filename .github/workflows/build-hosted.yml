@@ -47,37 +47,46 @@ jobs:
 
       - name: Install build tools
         run: |
-          set -euo pipefail
+          # Deliberately no `set -e` here: we want every missing tool reported in
+          # a single run instead of aborting on the first brew failure.
+          set -uo pipefail
           export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
           # ldid is required by the Makefile 'payload' target to ad-hoc sign the
           # app bundle. gmake is required because the Makefile declares
           # `SHELL := /bin/bash` and uses GNU-only constructs (pattern rules,
           # $(shell), .SUFFIXES); BSD make on macOS cannot build it. Neither is
-          # present on GitHub-hosted runners, which is what caused the first
-          # run to die with "gmake: command not found" (exit 127).
-          brew install gmake ldid
+          # present on GitHub-hosted runners.
+          #
+          # Homebrew refuses to auto-install the diskcatalogmaker cask that the
+          # ldid formula depends on, so it has to be installed explicitly first,
+          # otherwise `brew install ldid` aborts the job.
+          brew install --cask diskcatalogmaker || echo "WARN: diskcatalogmaker cask failed"
+          brew install gmake || echo "WARN: gmake failed"
+          brew install ldid || echo "WARN: ldid failed"
 
           # The Makefile requires javac to report exactly 1.8.0
           # (Makefile:194 filters on `javac -version`). GitHub's macOS images ship
           # Temurin 8, but fall back to Homebrew if java_home cannot resolve it.
           if ! /usr/libexec/java_home -v 1.8 >/dev/null 2>&1; then
             echo "JDK 8 not found, installing Temurin 8"
-            brew install --cask temurin@8
-            /usr/libexec/java_home -v 1.8
+            brew install --cask temurin@8 || echo "WARN: temurin@8 failed"
           fi
 
-          # Fail loudly and specifically here rather than 44 seconds into the job.
+          # Report every missing tool at once rather than dying later in the build.
+          missing=()
           for tool in gmake cmake ldid zip unzip xcrun; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              echo "MISSING REQUIRED TOOL: $tool" >&2
-              exit 1
-            fi
-            echo "ok: $tool -> $(command -v "$tool")"
+            command -v "$tool" >/dev/null 2>&1 && echo "ok: $tool -> $(command -v "$tool")" || missing+=("$tool")
           done
-          "$(/usr/libexec/java_home -v 1.8)/bin/javac" -version
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "MISSING REQUIRED TOOLS: ${missing[*]}" >&2
+            exit 1
+          fi
+
+          /usr/libexec/java_home -v 1.8 >/dev/null 2>&1 \
+            && "$(/usr/libexec/java_home -v 1.8)/bin/javac" -version \
+            || { echo "MISSING: JDK 8 (javac must report exactly 1.8.0)" >&2; exit 1; }
           gmake --version | head -1
-          ldid 2>&1 | head -2 || true
 
       - name: Cache CMake build and JREs
         uses: actions/cache@v4
