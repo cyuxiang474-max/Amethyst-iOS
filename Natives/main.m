@@ -195,7 +195,9 @@ void init_redirectStdio() {
 
 void init_setupAccounts() {
     NSString *controlPath = [@(getenv("AME_HOME")) stringByAppendingPathComponent:@"accounts"];
-    [fm createDirectoryAtPath:controlPath withIntermediateDirectories:NO attributes:nil error:nil];
+    // withIntermediateDirectories:NO silently failed whenever AME_HOME did not
+    // exist yet, leaving the directory missing and every account save to fail.
+    [fm createDirectoryAtPath:controlPath withIntermediateDirectories:YES attributes:nil error:nil];
 }
 
 void init_setupCustomControls() {

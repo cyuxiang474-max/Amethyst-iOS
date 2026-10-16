@@ -13,14 +13,25 @@ CFTypeRef SecTaskCopyValueForEntitlement(void* task, NSString* entitlement, CFEr
 void* SecTaskCreateFromSelf(CFAllocatorRef allocator);
 
 BOOL getEntitlementValue(NSString *key) {
+    // Two bugs lived here. The task was created twice -- once assigned to
+    // `secTask` and once inline as the SecTaskCopyValueForEntitlement argument
+    // -- so the inline one was never released. Worse, `value` was released by
+    // CFRelease *before* the return expression dereferenced it, so every call
+    // read freed memory. getEntitlementValue runs on the startup path and in
+    // the auto-RAM calculation, so this was a live use-after-free, not a leak.
     void *secTask = SecTaskCreateFromSelf(NULL);
-    CFTypeRef value = SecTaskCopyValueForEntitlement(SecTaskCreateFromSelf(NULL), key, nil);
-    CFRelease(secTask);
-    if (value == nil) {
+    if (secTask == NULL) {
         return NO;
     }
+    CFTypeRef value = SecTaskCopyValueForEntitlement(secTask, key, nil);
+    CFRelease(secTask);
+    if (value == NULL) {
+        return NO;
+    }
+    // Evaluate before releasing, then release, then return.
+    BOOL result = ![(__bridge id)value isKindOfClass:NSNumber.class] || [(__bridge id)value boolValue];
     CFRelease(value);
-    return ![(__bridge id)value isKindOfClass:NSNumber.class] || [(__bridge id)value boolValue];
+    return result;
 }
 
 BOOL isJITEnabled(BOOL checkCSFlags) {

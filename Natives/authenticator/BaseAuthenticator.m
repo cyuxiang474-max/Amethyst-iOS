@@ -59,11 +59,40 @@ static BaseAuthenticator *current = nil;
 
     [self.authData removeObjectForKey:@"input"];
 
-    NSString *newPath = [NSString stringWithFormat:@"%s/accounts/%@.json", getenv("AME_HOME"), self.authData[@"username"]];
-    if (self.authData[@"oldusername"] != nil && ![self.authData[@"username"] isEqualToString:self.authData[@"oldusername"]]) {
-        NSString *oldPath = [NSString stringWithFormat:@"%s/accounts/%@.json", getenv("AME_HOME"), self.authData[@"oldusername"]];
-        [NSFileManager.defaultManager moveItemAtPath:oldPath toPath:newPath error:&error];
-        // handle error?
+    NSString *username = self.authData[@"username"];
+    if (username.length == 0) {
+        showDialog(@"Error while saving file", @"The account has no username.");
+        return NO;
+    }
+
+    NSString *accountsDir = [NSString stringWithFormat:@"%s/accounts", getenv("AME_HOME")];
+    // saveChanges can run before init_setupAccounts() has created the directory
+    // (and a user may have cleared it), which previously made every write fail
+    // with a confusing "no such file" error.
+    [NSFileManager.defaultManager createDirectoryAtPath:accountsDir
+                           withIntermediateDirectories:YES
+                                            attributes:nil
+                                                 error:nil];
+
+    NSString *newPath = [accountsDir stringByAppendingPathComponent:
+                         [username stringByAppendingPathExtension:@"json"]];
+
+    NSString *oldUsername = self.authData[@"oldusername"];
+    if (oldUsername.length != 0 && ![oldUsername isEqualToString:username]) {
+        NSString *oldPath = [accountsDir stringByAppendingPathComponent:
+                             [oldUsername stringByAppendingPathExtension:@"json"]];
+        NSFileManager *fsm = NSFileManager.defaultManager;
+        NSError *moveError;
+        // moveItemAtPath fails when the destination already exists, which left
+        // the old account file behind as an unlistable duplicate. Clear the
+        // destination first so a rename always converges on one file.
+        if ([fsm fileExistsAtPath:newPath]) {
+            [fsm removeItemAtPath:newPath error:nil];
+        }
+        if (![fsm moveItemAtPath:oldPath toPath:newPath error:&moveError]) {
+            // Not fatal: the fresh data is written to newPath below either way.
+            NSLog(@"[Account] Could not move %@ to %@: %@", oldPath, newPath, moveError.localizedDescription);
+        }
     }
 
     [self.authData removeObjectForKey:@"oldusername"];
