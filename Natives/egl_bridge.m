@@ -66,6 +66,15 @@ int pojavInitOpenGL() {
         setenv("GALLIUM_DRIVER","zink",1);
         set_osm_bridge_tbl();
     }
+    // Log what was actually selected, not just what "auto" asked for. `auto`
+    // resolves to gl4es here, which silently contradicts JavaLauncher.m's
+    // auto -> RENDERER_NAME_MTL_ANGLE mapping and hides the fact that the
+    // player ended up on the CPU-translating backend instead of MetalANGLE.
+    NSLog(@"[Renderer] resolved '%s' -> '%s'%@", getenv("RENDERER") ?: "(unset)", renderer.UTF8String,
+          [renderer isEqualToString:@ RENDERER_NAME_GL4ES]
+              ? @"  (gl4es translates OpenGL on the CPU; libtinygl4angle.dylib uses Metal and is far faster)"
+              : @"");
+
     JNI_LWJGL_changeRenderer(renderer.UTF8String);
     // Preload renderer library
     dlopen([NSString stringWithFormat:@"@rpath/%@", renderer].UTF8String, RTLD_GLOBAL);
