@@ -314,13 +314,30 @@ int launchJVM(NSString *username, id launchTarget, int width, int height, int mi
     NSLog(@"[JavaLauncher] JAVA_HOME has been set to %@", javaHome);
 
     int allocmem;
+    BOOL hasExtendedVA = getEntitlementValue(@"com.apple.developer.kernel.extended-virtual-addressing");
     if (getPrefBool(@"java.auto_ram")) {
         CGFloat autoRatio = getEntitlementValue(@"com.apple.private.memorystatus") ? 0.4 : 0.25;
         allocmem = roundf((NSProcessInfo.processInfo.physicalMemory >> 20) * autoRatio);
+        // Without extended virtual addressing the whole process is confined to
+        // roughly a 4 GB address space. Handing the heap 40% of physical memory
+        // leaves the JIT code cache nowhere to grow, and HotSpot then reports
+        // "CodeCache is full. Compiler has been disabled." while printing
+        // 100+ MB free -- the free space is real but nothing contiguous is left.
+        // Disabling the compiler is far worse for framerate than a smaller heap:
+        // new methods stop being compiled to machine code entirely.
+        if (!hasExtendedVA) {
+            const int heapCapMB = 2048;
+            if (allocmem > heapCapMB) {
+                NSLog(@"[JavaLauncher] extended-virtual-addressing unavailable; capping -Xmx from %d MB to %d MB so the JIT code cache can grow",
+                      allocmem, heapCapMB);
+                allocmem = heapCapMB;
+            }
+        }
     } else {
         allocmem = getPrefInt(@"java.allocated_memory");
     }
     NSLog(@"[JavaLauncher] Max RAM allocation is set to %d MB", allocmem);
+    NSLog(@"[JavaLauncher] extended-virtual-addressing: %@", hasExtendedVA ? @"YES" : @"NO");
     if (!validateVirtualMemorySpace(allocmem)) {
         UIKit_returnToSplitView();
         if (getEntitlementValue(@"com.apple.developer.kernel.increased-memory-limit")) {
